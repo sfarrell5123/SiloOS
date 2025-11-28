@@ -4,6 +4,8 @@
 
 **The Agent Operating System for AI You Can't Trust**
 
+SiloOS is a security-first, privacy-first execution environment for AI agents. It treats AI as a first-class citizen that happens to be fundamentally untrustworthy—like a rogue employee with superhuman capabilities who needs to be strapped down to a chair and monitored.
+
 ## The Matrix in Reverse
 
 ![Would you trust me? SiloOS doesn't.](would-you-trust-me.webp)
@@ -20,8 +22,6 @@ When an agent hesitates, we plug in a human. Same workspace, same tools—but th
 ---
 
 > *"It's like having a brilliant, dangerous prisoner. You want their insights, you need their capabilities—but you don't trust them as far as you can throw them. So you build a padded cell."*
-
-SiloOS is a security-first, privacy-first execution environment for AI agents. It treats AI as a first-class citizen that happens to be fundamentally untrustworthy—like a rogue employee with superhuman capabilities who needs to be strapped down to a chair and monitored.
 
 ## The Problem
 
