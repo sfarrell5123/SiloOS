@@ -1,11 +1,13 @@
 # SiloOS Workflow Patterns
 
+This document describes the high-level patterns for how work flows through SiloOS. For technical implementation details (YAML syntax, status codes, etc.), see [workflows.md](workflows.md).
+
 ## The Router as Kernel
 
 The router is the central nervous system of SiloOS. It's the only component that:
 
 - Receives external tasks
-- Knows about all available agents
+- Looks up which workflow to run
 - Mints and manages task keys
 - Handles escalation and handoffs
 - Routes to humans when needed
@@ -38,144 +40,95 @@ Think of it as the kernel of the operating system—all communication flows thro
           └───────────────────────────────┘
 ```
 
+**The router is dumb on purpose.** No AI, no LLM calls, no "creativity." Just deterministic code that loads workflow definitions and follows the rules. This keeps the control plane secure, testable, and auditable.
+
 ## Task Lifecycle
 
-### 1. Task Arrival
+### How Work Flows Through the System
 
-```python
-# Customer starts a web chat
-incoming_task = {
-    "source": "web_chat",
-    "customer_token": "cust_tk_789xyz",  # Already tokenized by ingress
-    "session_id": "sess_abc123",
-    "message": "I want a refund for my order",
-    "metadata": {
-        "channel": "website",
-        "page": "/support",
-        "timestamp": "2024-03-15T14:22:33Z"
-    }
-}
+```
+1. Task arrives (web chat, email, API call)
+         │
+         ▼
+2. Router looks up workflow by source
+   (e.g., web_chat → support-workflow)
+         │
+         ▼
+3. Router mints task keys
+   (customer access token, case token, expiry)
+         │
+         ▼
+4. Router runs first agent in workflow
+         │
+         ▼
+5. Agent does its job, returns a result
+         │
+         ▼
+6. Router handles result:
+   ├── Success → next agent in workflow
+   ├── Redirect → run specialist, come back
+   ├── Human needed → route to human
+   └── Abort → log and stop
 ```
 
-### 2. Initial Classification
+### Intent Classification
 
-The router makes a quick classification:
+Sometimes the router doesn't know what kind of task it is. That's where an **intent agent** comes in.
 
-```python
-# Router's internal process
-classification = router.classify(incoming_task)
-# Returns: {"type": "refund_request", "confidence": 0.92}
+```
+Unknown task arrives
+        │
+        ▼
+Router runs intent-workflow
+        │
+        ▼
+intent-agent classifies:
+"This is a calendar request"
+        │
+        ▼
+Router redirects to calendar-workflow
 ```
 
-### 3. Key Minting
-
-```python
-# Router creates task keys
-task_keys = router.mint_keys(
-    customer=incoming_task["customer_token"],
-    task_type=classification["type"],
-    ttl=timedelta(minutes=30)
-)
-
-# task_keys now contains:
-# - Customer data access token
-# - Case ID token
-# - Expiration timestamp
-# - Router signature
-```
-
-### 4. Agent Selection
-
-```python
-# Find the right agent
-agent = router.select_agent(
-    task_type=classification["type"],
-    required_capabilities=["refund", "email"]
-)
-# Returns: "refund-agent"
-```
-
-### 5. Task Dispatch
-
-```python
-# Dispatch to agent
-result = router.dispatch(
-    agent="refund-agent",
-    task=incoming_task,
-    task_keys=task_keys
-)
-```
-
-### 6. Result Handling
-
-```python
-# Agent returns one of:
-
-# SUCCESS - Task completed
-{"status": "complete", "response": "Refund processed", "actions_taken": [...]}
-
-# ESCALATE - Needs another agent
-{"status": "escalate", "target": "manager", "reason": "over_limit", "context": {...}}
-
-# ERROR - Something went wrong
-{"status": "error", "error": "customer_not_found", "recoverable": False}
-
-# CONTINUE - Multi-turn conversation
-{"status": "continue", "response": "What's your order number?", "awaiting": "user_input"}
-```
+The intent agent is just another agent—it runs inside a padded cell like everything else. The router doesn't do the classification itself. The router stays dumb.
 
 ## Escalation Patterns
 
-### Vertical Escalation (To Manager)
+Real support teams escalate all the time. So do SiloOS agents.
+
+### Vertical Escalation (Up the Chain)
 
 When an agent hits its authority limit:
 
 ```
 Customer: "I want a refund for $750"
 
-refund-agent: [Checks limit: $500 max]
-            → Escalates to manager-agent
+refund-agent: [Checks: my limit is $500]
+            → "I need manager approval"
+            → Escalates up
 
 manager-agent: [Has $2000 limit]
-             → Processes refund
+             → Approves refund
              → Returns success
 ```
 
-The flow:
+The refund-agent knows its limits (defined in its base keys). When it can't proceed, it escalates with a recommendation. The manager-agent gets the context and makes the call.
 
-```
-1. refund-agent returns:
-   { "escalate": "manager", "reason": "amount_exceeds_limit",
-     "recommendation": "approve", "notes": "Valid return, good customer history" }
-
-2. Router receives escalation
-
-3. Router mints NEW task keys for manager-agent
-   (Old keys are invalidated)
-
-4. Router dispatches to manager-agent with:
-   - Original task context
-   - Escalation reason
-   - Previous agent's recommendation
-   - Fresh task keys
-
-5. manager-agent handles it
-```
-
-### Horizontal Escalation (To Another Department)
+### Horizontal Escalation (Different Department)
 
 When the task belongs to a different team:
 
 ```
 Customer: "My payment failed and now my account is locked"
 
-support-agent: [This is a payments issue]
+support-agent: [This is a payments issue, not general support]
              → Escalates to payments-agent
 
 payments-agent: [Checks payment status]
               → Unlocks account
               → Returns success
 ```
+
+The support-agent recognizes it's out of its depth and hands off. No shame in that—it's the right thing to do.
 
 ### Human Escalation
 
@@ -185,12 +138,14 @@ When AI can't or shouldn't handle it:
 Customer: "I'm going to sue you"
 
 support-agent: [Detects legal threat]
-             → Escalates to human
+             → Escalates to human immediately
 ```
+
+Some things require human judgment. Legal threats, emotional customers, unusual situations—the agent knows when to step back.
 
 ## "Plug In a Human"
 
-One of the most powerful patterns in SiloOS: humans are just another agent type.
+One of the most powerful patterns in SiloOS: **humans are just another agent type**.
 
 > *"Hey, quickly—we've got to plug in a human!"*
 
@@ -204,15 +159,7 @@ If an agent needs maintenance:
 4. Fix and redeploy the agent
 5. Traffic returns to AI
 
-```python
-# Router configuration
-agents = {
-    "refund-agent": {
-        "status": "offline",  # Under maintenance
-        "fallback": "human-pool"
-    }
-}
-```
+No downtime. No special handling. Humans slot right in.
 
 ### The Human Interface
 
@@ -250,19 +197,11 @@ Humans get:
 └────────────────────────────────────────────────────┘
 ```
 
+The human sees the same tokenized customer ID the agent would see. Same tools, same constraints, same audit trail.
+
 ### Testing with Humans
 
-Route 1-in-100 cases to humans for quality assurance:
-
-```python
-# Router sampling
-if random.random() < 0.01:
-    route_to = "human-qa"  # Human handles it
-else:
-    route_to = "refund-agent"  # AI handles it
-```
-
-Compare human vs AI decisions to improve agent policies.
+Route a percentage of cases to humans for quality assurance. Compare human decisions against AI decisions. Use the differences to improve agent policies.
 
 ## Multi-Turn Conversations
 
@@ -272,70 +211,36 @@ Some tasks require back-and-forth:
 Turn 1:
   Customer: "I want a refund"
   Agent: "Sure! What's your order number?"
-  → Returns: { "status": "continue", "awaiting": "order_number" }
 
 Turn 2:
   Customer: "Order #12345"
   Agent: "I found it. Reason for return?"
-  → Returns: { "status": "continue", "awaiting": "reason" }
 
 Turn 3:
   Customer: "It arrived broken"
   Agent: "Refund processed! Confirmation sent."
-  → Returns: { "status": "complete" }
 ```
 
-### Conversation State
+The router maintains conversation state across turns. Each time the customer responds, the agent gets the full conversation history plus the new message. The agent is still stateless—it just gets more context each turn.
 
-The router maintains conversation state:
+## Asking for Help (and Getting Control Back)
 
-```python
-conversation = {
-    "session_id": "sess_abc123",
-    "customer_token": "cust_tk_789xyz",
-    "agent": "refund-agent",
-    "turns": [
-        {"role": "customer", "content": "I want a refund"},
-        {"role": "agent", "content": "Sure! What's your order number?"},
-        {"role": "customer", "content": "Order #12345"},
-        # ...
-    ],
-    "awaiting": "reason",
-    "task_keys": {...}  # Still valid
-}
+Sometimes an agent needs a specialist but wants to continue afterward.
+
+```
+intent-agent: "This needs calendar info"
+            → Asks calendar-agent for help
+
+calendar-agent: [Checks availability]
+              → Returns: "Tuesday 2pm is free"
+
+intent-agent: [Gets the answer back]
+            → "I can book you for Tuesday 2pm. Confirm?"
 ```
 
-Each turn, the full conversation is passed to the agent.
+The agent that asked for help gets control back with the specialist's output. It can then decide what to do next: continue, ask another specialist, or escalate to human.
 
-## Return to Sender
-
-When an agent escalates, it can include a "return address":
-
-```python
-{
-    "escalate": "manager",
-    "reason": "needs_approval",
-    "return_to": "refund-agent",  # Come back here after
-    "context": {
-        "approved_action": "refund",
-        "amount": 750
-    }
-}
-```
-
-If the manager approves:
-
-```python
-# Manager returns
-{
-    "return": "refund-agent",
-    "decision": "approved",
-    "notes": "Customer has good history"
-}
-
-# Router sends back to refund-agent
-# With manager's approval in context
-```
+For technical details on how this works, see the 302 soft redirect pattern in [workflows.md](workflows.md).
 
 ## No Direct Agent-to-Agent Communication
 
@@ -356,7 +261,7 @@ Agent A ───▶ Router ───▶ Agent B
 
 1. **Security**: All key transfers go through router
 2. **Observability**: Every handoff is logged
-3. **Simplicity**: No agent discovery/authentication
+3. **Simplicity**: No agent discovery or authentication
 4. **Control**: Router can intercept, redirect, or deny
 
 It's like a support center: agents transfer calls through the switchboard, they don't yell across the room.
@@ -366,10 +271,12 @@ It's like a support center: agents transfer calls through the switchboard, they 
 | Pattern | Use Case |
 |---------|----------|
 | Vertical escalation | Authority limits, approval needed |
-| Horizontal escalation | Different department/skill |
-| Human escalation | AI can't/shouldn't handle |
+| Horizontal escalation | Different department or skill |
+| Human escalation | AI can't or shouldn't handle |
 | Plug in human | Agent offline, QA testing |
 | Multi-turn | Conversations requiring dialogue |
-| Return to sender | Need approval then continue |
+| Ask for help | Need specialist input, then continue |
 
 The router orchestrates everything. Agents are stateless workers. Humans are just another agent type. Everything flows through the kernel.
+
+For implementation details, see [workflows.md](workflows.md).
