@@ -1,5 +1,30 @@
 # SiloOS Workflows
 
+## This Replaces n8n
+
+n8n, Zapier, Make, and friends have the same problem: **LLM in the control plane**.
+
+You draw a visual graph, hope the AI in the middle makes good decisions, and pray it's auditable. It's not. It's:
+
+- **Not inspectable**: Visual graphs hide complexity
+- **Not testable**: How do you unit test a flowchart?
+- **Not secure**: AI making routing decisions outside any sandbox
+- **Not auditable**: Good luck explaining that to compliance
+- **Hard to version**: Try diffing a JSON blob of node positions
+
+MCP has the same disease: bloated, opaque, AI-in-the-wiring.
+
+**SiloOS workflows are the opposite:**
+
+- YAML text files (diff-able, reviewable)
+- Router is dumb code (no AI, fully testable)
+- AI only runs inside padded cells (agents)
+- Everything logged, everything explicit
+
+No low-code spaghetti. No hidden AI in the control plane.
+
+---
+
 ## The Router Stays Dumb
 
 The router is outside the jail cells. It's outside the security boundary. So we don't run AI in the router.
@@ -143,6 +168,7 @@ Agents return simple status codes. The router acts deterministically.
 | Code | Meaning | Router Action |
 |------|---------|---------------|
 | `200` | Success | Pass to next stage |
+| `302` | Redirect | Jump to named agent/workflow (must be in allowed list) |
 | `400` | Human needed | Route to human-agent, then continue |
 | `500` | Failed | Abort workflow |
 
@@ -188,6 +214,125 @@ return {
 ```
 
 Router aborts. Logs everything. Alerts operator.
+
+### 302: Redirect to Another Agent
+
+An agent can request a different agent handle this—but only if that agent is in the workflow's allowed list:
+
+```python
+return {
+    "status": 302,
+    "redirect": "calendar-agent",  # Must be in workflow's allowed_redirects
+    "summary": {
+        "what_i_did": "Classified intent as calendar request",
+        "confidence": 0.94
+    }
+}
+```
+
+The workflow must explicitly allow this:
+
+```yaml
+stages:
+  - agent: intent-agent
+    allowed_redirects:
+      - calendar-agent
+      - research-agent
+      - support-agent
+
+on_redirect:
+  calendar-agent: calendar-workflow
+  research-agent: research-workflow
+  support-agent: support-workflow
+```
+
+The agent suggests. The router validates against the allowed list. No agent can redirect somewhere unexpected.
+
+## Decision Agents
+
+The popular n8n pattern: "Message arrives → LLM decides what to do → routes to calendar or info lookup or whatever."
+
+In SiloOS, that becomes a **decision agent**:
+
+```yaml
+# workflows/incoming-message.yaml
+
+name: incoming-message
+stages:
+  - agent: intent-agent
+    allowed_redirects:
+      - calendar-agent
+      - research-agent
+      - order-agent
+      - support-agent
+
+on_redirect:
+  calendar-agent: calendar-workflow
+  research-agent: research-workflow
+  order-agent: order-workflow
+  support-agent: support-workflow
+
+on_error:
+  400: human-agent
+  500: abort
+```
+
+### How It Works
+
+1. **intent-agent** runs in its padded cell:
+   - Reads the incoming message
+   - Reads its markdown about available capabilities
+   - Outputs: `{ status: 302, redirect: "calendar-agent", confidence: 0.94 }`
+
+2. **Router** (dumb code):
+   - Checks: Is "calendar-agent" in `allowed_redirects`? Yes.
+   - Looks up: `on_redirect.calendar-agent` → `calendar-workflow`
+   - Jumps to `calendar-workflow`
+
+3. **calendar-workflow** runs its stages
+
+The decision is AI-generated. The branching is old-school code reading a string field and checking a whitelist.
+
+### Low Confidence? Human.
+
+```python
+# intent-agent returns
+return {
+    "status": 302 if confidence > 0.8 else 400,
+    "redirect": "calendar-agent" if confidence > 0.8 else None,
+    "summary": {
+        "intent": "calendar",
+        "confidence": 0.62,  # Too low
+        "needs_human": "Unclear if this is a calendar request or general question"
+    }
+}
+```
+
+Router sees 400 → routes to human. Human clarifies. Workflow continues.
+
+## Atomic Workflows, Not Giant Graphs
+
+Instead of one massive n8n flowchart, you get small focused workflows:
+
+```
+workflows/
+├── incoming-message.yaml      # Intent classification → redirect
+├── calendar-workflow.yaml     # Handle calendar requests
+├── research-workflow.yaml     # Research and respond
+├── order-workflow.yaml        # Order lookup and support
+├── support-workflow.yaml      # General support
+└── publish-workflow.yaml      # Content publishing pipeline
+```
+
+Each is just a list of agents + simple error handling.
+
+The only "graphy" bit: `incoming-message` can jump into one of the others based on intent-agent's output.
+
+**Branching stays:**
+- Explicit (listed in YAML)
+- Testable (unit test "intent X → workflow Y")
+- Diff-able in Git
+- No hidden flows inside a visual editor
 
 ## Example: Publishing Pipeline
 
@@ -334,11 +479,14 @@ No knowledge of the pipeline. Just do the job.
 | Component | Role |
 |-----------|------|
 | **Router** | Dumb orchestrator. No AI. Loads YAML, marches through stages. |
-| **Workflow** | Declarative pipeline. List of agents + error handling. |
+| **Workflow** | Declarative pipeline. List of agents + error handling + allowed redirects. |
 | **Workflow State** | Interim assets + summaries. Scoped to task key. |
 | **Agent** | Stateless worker. Does its job. Returns status + summary. |
-| **Status Codes** | 200 (next), 400 (human), 500 (abort). No ambiguity. |
+| **Decision Agent** | Classifies intent, returns 302 + redirect target from allowed list. |
+| **Status Codes** | 200 (next), 302 (redirect), 400 (human), 500 (abort). |
 
 Agents stay in their cells. The router stays deterministic. Workflows chain them together without coupling.
+
+**This is what n8n should have been:** text files, dumb routing, AI only in the sandboxes.
 
 *Simple. Inspectable. Debuggable. Safe.*
