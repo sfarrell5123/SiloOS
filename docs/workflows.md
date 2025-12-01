@@ -215,14 +215,14 @@ return {
 
 Router aborts. Logs everything. Alerts operator.
 
-### 302: Redirect to Another Agent
+### 302: Redirect
 
-An agent can request a different agent handle this—but only if that agent is in the workflow's allowed list:
+An agent can request a redirect to a different agent or workflow—but only if it's in the allowed list:
 
 ```python
 return {
     "status": 302,
-    "redirect": "calendar-agent",  # Must be in workflow's allowed_redirects
+    "redirect": "calendar-workflow",  # Must be in allowed_redirects
     "summary": {
         "what_i_did": "Classified intent as calendar request",
         "confidence": 0.94
@@ -236,17 +236,17 @@ The workflow must explicitly allow this:
 stages:
   - agent: intent-agent
     allowed_redirects:
-      - calendar-agent
-      - research-agent
-      - support-agent
-
-on_redirect:
-  calendar-agent: calendar-workflow
-  research-agent: research-workflow
-  support-agent: support-workflow
+      - calendar-agent       # Jump to a single agent
+      - calendar-workflow    # Jump to an entire workflow
+      - research-workflow
+      - support-workflow
 ```
 
-The agent suggests. The router validates against the allowed list. No agent can redirect somewhere unexpected.
+Redirects can be:
+- **An agent**: Run that agent, then continue this workflow
+- **A workflow**: Exit this workflow, enter the other one
+
+Either way, it must be in `allowed_redirects`. The agent suggests. The router validates against the whitelist. No agent can redirect somewhere unexpected.
 
 ## Decision Agents
 
@@ -261,16 +261,10 @@ name: incoming-message
 stages:
   - agent: intent-agent
     allowed_redirects:
-      - calendar-agent
-      - research-agent
-      - order-agent
-      - support-agent
-
-on_redirect:
-  calendar-agent: calendar-workflow
-  research-agent: research-workflow
-  order-agent: order-workflow
-  support-agent: support-workflow
+      - calendar-workflow
+      - research-workflow
+      - order-workflow
+      - support-workflow
 
 on_error:
   400: human-agent
@@ -282,11 +276,10 @@ on_error:
 1. **intent-agent** runs in its padded cell:
    - Reads the incoming message
    - Reads its markdown about available capabilities
-   - Outputs: `{ status: 302, redirect: "calendar-agent", confidence: 0.94 }`
+   - Outputs: `{ status: 302, redirect: "calendar-workflow", confidence: 0.94 }`
 
 2. **Router** (dumb code):
-   - Checks: Is "calendar-agent" in `allowed_redirects`? Yes.
-   - Looks up: `on_redirect.calendar-agent` → `calendar-workflow`
+   - Checks: Is "calendar-workflow" in `allowed_redirects`? Yes.
    - Jumps to `calendar-workflow`
 
 3. **calendar-workflow** runs its stages
