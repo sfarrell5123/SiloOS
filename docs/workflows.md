@@ -203,7 +203,7 @@ return {
 
 ### 302: Soft Redirect (come back)
 
-Agent wants a specialist to handle something, then continue the 200 path.
+Agent wants a specialist to handle something, then **return to the same agent** to process the result.
 
 ```python
 return {
@@ -214,6 +214,29 @@ return {
         "confidence": 0.94
     }
 }
+```
+
+**302 Flow:**
+```
+intent-agent → 302:calendar-agent → calendar-agent → intent-agent (again)
+                                                      ├── 200 → next stage
+                                                      ├── 302 → another redirect
+                                                      └── 400 → human help
+```
+
+The agent that issued the 302 gets called again with the specialist's output. It can:
+- **200**: Done, move to next stage
+- **302**: Need another specialist (loop)
+- **400**: Confused, need human
+
+**Loop protection:** Router counts redirects per agent. Default limit: 3. Exceeds limit → 400 to human.
+
+```yaml
+stages:
+  - agent: intent-agent
+    302:
+      calendar-agent: "Calendar operations"
+    max_redirects: 3  # Optional, default 3
 ```
 
 ### 400: Human-in-the-Loop
@@ -349,11 +372,17 @@ on_error:
 
 2. **Router** (dumb code):
    - Checks: Is "calendar-agent" in `302`? Yes.
+   - Increments redirect counter for intent-agent
    - Runs `calendar-agent`
 
-3. **calendar-agent** does its thing, returns 200
+3. **calendar-agent** does its thing, returns 200 with results
 
-4. **Workflow continues** to `response-agent` (because it was a 302, not 301)
+4. **Router returns to intent-agent** with calendar-agent's output
+
+5. **intent-agent** sees the calendar results:
+   - Has what it needs → returns 200 → moves to `response-agent`
+   - Needs more info → returns another 302 (if under limit)
+   - Confused → returns 400 → human help
 
 The decision is AI-generated. The branching is old-school code reading a string field and checking a whitelist.
 
