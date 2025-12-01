@@ -79,6 +79,24 @@ No complex inter-agent communication protocols. If an agent can't handle somethi
 
 When an agent goes offline for maintenance, the router simply routes to a human instead. The human gets the same interface, same tools, same markdown procedures. *"Hey, quickly—we've got to plug in a human!"*
 
+### Workflows: Chain Agents Without Coupling
+
+Need to run multiple agents in sequence? Workflows are declarative pipelines:
+
+```yaml
+stages:
+  - agent: research-agent
+  - agent: writer-agent
+  - agent: editor-agent
+  - agent: publisher-agent
+
+on_error:
+  400: human-agent
+  500: abort
+```
+
+The router (pure deterministic code, no AI) marches through stages. Each agent receives interim assets from the previous stage, does its job, returns a status. Agents don't know they're in a workflow. They don't talk to each other. The router handles sequencing, the workflow state travels with the task key.
+
 ## Documentation
 
 | Document | Description |
@@ -87,6 +105,7 @@ When an agent goes offline for maintenance, the router simply routes to a human 
 | [Security Model](docs/security-model.md) | Zero-trust, JWT tokens, capability-based access |
 | [Privacy Model](docs/privacy-model.md) | Tokenization and why agents never see real PII |
 | [Agent Structure](docs/agent-structure.md) | Anatomy of an agent: folders, markdown, tools |
+| [Workflows](docs/workflows.md) | Declarative pipelines, dumb router, no agent coupling |
 | [Workflow Patterns](docs/workflow-patterns.md) | Routing, escalation, and human-in-the-loop |
 | [Markdown OS](docs/markdown-os.md) | Instructions in natural language, not code |
 | [AI First-Class](docs/ai-first-class.md) | Maximize the agent, restrict the exits |
