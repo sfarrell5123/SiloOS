@@ -167,8 +167,9 @@ Agents return simple status codes. The router acts deterministically.
 
 | Code | Meaning | Router Action |
 |------|---------|---------------|
-| `200` | Success | Pass to next stage |
-| `302` | Redirect | Jump to named agent/workflow (must be in allowed list) |
+| `200` | Success | Next stage in 200 path |
+| `301` | Hard redirect | Run target, workflow ends |
+| `302` | Soft redirect | Run target, continue 200 path |
 | `400` | Human needed | Route to human-agent, then continue |
 | `500` | Failed | Abort workflow |
 
@@ -179,6 +180,40 @@ No ambiguity. No negotiation.
 on_error:
   400: human-agent
   500: abort
+```
+
+### 200: Success
+
+Agent completed its task. Move to next stage.
+
+### 301: Hard Redirect (don't come back)
+
+Agent wants to hand off completely. Run the target, workflow ends there.
+
+```python
+return {
+    "status": 301,
+    "redirect": "support-workflow",  # Must be in 301 list
+    "summary": {
+        "what_i_did": "Classified as complex support case",
+        "confidence": 0.91
+    }
+}
+```
+
+### 302: Soft Redirect (come back)
+
+Agent wants a specialist to handle something, then continue the 200 path.
+
+```python
+return {
+    "status": 302,
+    "redirect": "calendar-agent",  # Must be in 302 list
+    "summary": {
+        "what_i_did": "Classified intent as calendar request",
+        "confidence": 0.94
+    }
+}
 ```
 
 ### 400: Human-in-the-Loop
@@ -215,38 +250,70 @@ return {
 
 Router aborts. Logs everything. Alerts operator.
 
-### 302: Redirect
+## Redirects with Descriptions
 
-An agent can request a redirect to a different agent or workflow—but only if it's in the allowed list:
-
-```python
-return {
-    "status": 302,
-    "redirect": "calendar-agent",  # Must be in allowed_redirects
-    "summary": {
-        "what_i_did": "Classified intent as calendar request",
-        "confidence": 0.94
-    }
-}
-```
-
-The workflow must explicitly allow this:
+Redirects need descriptions so the agent knows what each target does. Simple key-value: agent/workflow name → description string.
 
 ```yaml
 stages:
   - agent: intent-agent
-    allowed_redirects:
-      - calendar-agent       # Jump to a single agent (most common)
-      - research-agent
-      - support-agent
-      - escalate-workflow    # Or jump to an entire workflow
+    302:  # Soft redirects - come back to 200 path
+      calendar-agent: "Handle calendar operations: scheduling, availability. Use when user mentions dates, times, meetings."
+      order-agent: "Order lookup, tracking, modifications. Use when user asks about their order."
+      research-agent: "Research topics, gather information. Use for fact-finding questions."
+    301:  # Hard redirects - hand off completely
+      support-workflow: "Complex support cases requiring multiple steps."
+      escalate-workflow: "Escalation required - manager approval needed."
+  - agent: response-agent  # Runs after 302, not after 301
+
+on_error:
+  400: human-agent
+  500: abort
 ```
 
-Redirects can target:
-- **An agent** (typical): Run that agent, then continue this workflow
-- **A workflow** (less common): Exit this workflow, enter the other one
+The description is a prompt hint—tips, examples, when to use. Whatever helps the LLM decide.
 
-Either way, it must be in `allowed_redirects`. The agent suggests. The router validates against the whitelist. No agent can redirect somewhere unexpected.
+## What Agents See: The Outcomes Object
+
+Router injects the full decision space into the agent's context:
+
+```json
+{
+  "task": { ... },
+  "outcomes": {
+    "200": "response-agent",
+    "301": {
+      "support-workflow": "Complex support cases requiring multiple steps.",
+      "escalate-workflow": "Escalation required - manager approval needed."
+    },
+    "302": {
+      "calendar-agent": "Handle calendar operations: scheduling, availability...",
+      "order-agent": "Order lookup, tracking, modifications...",
+      "research-agent": "Research topics, gather information..."
+    },
+    "400": "human-agent",
+    "500": "abort"
+  }
+}
+```
+
+Clear, terse, informative. The agent sees the whole decision space at a glance.
+
+The agent's markdown can reference this:
+
+```markdown
+# Intent Classification
+
+Review the user's message and choose the appropriate outcome:
+
+- 200: Task complete, move to next stage
+- 301: Hand off completely to another workflow (see options)
+- 302: Get help from a specialist, then continue (see options)
+- 400: Need human help
+- 500: Cannot proceed, abort
+
+If confidence is below 80%, return 400 for human review.
+```
 
 ## Decision Agents
 
@@ -260,13 +327,12 @@ In SiloOS, that becomes a **decision agent**:
 name: incoming-message
 stages:
   - agent: intent-agent
-    allowed_redirects:
-      - calendar-agent
-      - research-agent
-      - order-agent
-      - support-agent
-
-  # After redirect, continue with response
+    302:  # Soft redirects - come back for response
+      calendar-agent: "Calendar operations: scheduling, availability, meetings."
+      order-agent: "Order lookup, tracking, modifications."
+      research-agent: "Research and fact-finding questions."
+    301:  # Hard redirects - hand off completely
+      support-workflow: "Complex support cases."
   - agent: response-agent
 
 on_error:
@@ -278,16 +344,16 @@ on_error:
 
 1. **intent-agent** runs in its padded cell:
    - Reads the incoming message
-   - Reads its markdown about available capabilities
+   - Sees `outcomes` object with all options and descriptions
    - Outputs: `{ status: 302, redirect: "calendar-agent", confidence: 0.94 }`
 
 2. **Router** (dumb code):
-   - Checks: Is "calendar-agent" in `allowed_redirects`? Yes.
+   - Checks: Is "calendar-agent" in `302`? Yes.
    - Runs `calendar-agent`
 
 3. **calendar-agent** does its thing, returns 200
 
-4. **Workflow continues** to `response-agent`
+4. **Workflow continues** to `response-agent` (because it was a 302, not 301)
 
 The decision is AI-generated. The branching is old-school code reading a string field and checking a whitelist.
 
@@ -477,11 +543,11 @@ No knowledge of the pipeline. Just do the job.
 | Component | Role |
 |-----------|------|
 | **Router** | Dumb orchestrator. No AI. Loads YAML, marches through stages. |
-| **Workflow** | Declarative pipeline. List of agents + error handling + allowed redirects. |
+| **Workflow** | Declarative pipeline. List of agents + 301/302 redirects with descriptions. |
+| **Outcomes Object** | Full decision space passed to agent: 200/301/302/400/500 with targets and descriptions. |
 | **Workflow State** | Interim assets + summaries. Scoped to task key. |
 | **Agent** | Stateless worker. Does its job. Returns status + summary. |
-| **Decision Agent** | Classifies intent, returns 302 + redirect target from allowed list. |
-| **Status Codes** | 200 (next), 302 (redirect), 400 (human), 500 (abort). |
+| **Status Codes** | 200 (next), 301 (hard redirect), 302 (soft redirect), 400 (human), 500 (abort). |
 
 Agents stay in their cells. The router stays deterministic. Workflows chain them together without coupling.
 
